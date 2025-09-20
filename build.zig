@@ -9,13 +9,17 @@ pub fn build(b: *std.Build) void {
     const phasor_ecs_module = phasor_ecs_dep.module("phasor-ecs");
 
     // phasor-phases library module
-    const phasor_phases = b.addModule("phasor-phases", .{
+    const phasor_phases_module = b.addModule("phasor-phases", .{
         .root_source_file = b.path("lib/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "phasor-ecs", .module = phasor_ecs_module },
         },
+    });
+
+    const phasor_phases_module_test_runner = b.addTest(.{
+        .root_module = phasor_phases_module,
     });
 
     const phasor_phases_tests = b.addModule(
@@ -26,7 +30,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "phasor-ecs", .module = phasor_ecs_module },
-                .{ .name = "phasor-phases", .module = phasor_phases },
+                .{ .name = "phasor-phases", .module = phasor_phases_module },
             },
         },
     );
@@ -34,7 +38,9 @@ pub fn build(b: *std.Build) void {
         .root_module = phasor_phases_tests,
     });
 
+    const run_phasor_phases_module_tests = b.addRunArtifact(phasor_phases_module_test_runner);
     const run_phasor_phases_tests = b.addRunArtifact(phasor_phases_test_runner);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_phasor_phases_tests.step);
+    test_step.dependOn(&run_phasor_phases_module_tests.step);
 }
