@@ -1,6 +1,12 @@
 .{
     .name = .phasor_phases,
     .version = "0.0.1",
+    .dependencies = .{
+        .phasor_ecs = .{
+            .url = "git+https://github.com/b33j0r/phasor-ecs#8129c054472bae092bd8e1c27902e28ca9468e0b",
+            .hash = "phasor_ecs-0.2.0-BVn8o3_0AADiM2kqQlR0GuGCJNNzn8I1ccCM8xEgwaAD",
+        },
+    },
     .minimum_zig_version = "0.15.1",
     .paths = .{""},
     .fingerprint = 0x903de1371efab27,
