@@ -1,43 +1,69 @@
-const std = @import("std");
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Hierarchical StateMachine core
-// ─────────────────────────────────────────────────────────────────────────────
-
-pub fn StateMachine(comptime States: type, comptime Context: type) type {
+pub fn StateMachine(comptime States: type, comptime Context: type, comptime ContextFactory: type) type {
     return struct {
         const Self = @This();
 
-        ctx: *Context,
+        allocator: std.mem.Allocator,
+        context_factory: *ContextFactory,
+
+        // One context per *active level* in the current state path (root .. leaf).
+        // Index 0 = topmost active level; last = current leaf level.
+        ctx_stack: std.ArrayListUnmanaged(*Context) = .empty,
+
         current: ?States = null,
 
-        pub fn init(ctx: *Context) Self {
+        pub fn init(
+            allocator: std.mem.Allocator,
+            context_factory: *ContextFactory,
+        ) Self {
             return .{
-                .ctx = ctx,
+                .allocator = allocator,
+                .context_factory = context_factory,
+                .ctx_stack = .empty,
                 .current = null,
             };
         }
 
-        /// Transition with hierarchical semantics:
-        /// - Compute LCA between current and next
-        /// - Exit from leaf up to (but not including) the LCA
-        /// - Enter from just below the LCA down to the leaf
+        pub fn deinit(self: *Self) void {
+            // Defensive: if the machine is dropped while some contexts are live, drain them properly
+            var i: usize = self.ctx_stack.items.len;
+            while (i > 0) {
+                i -= 1;
+                self.context_factory.deinit(self.ctx_stack.items[i]);
+            }
+            self.ctx_stack.deinit(self.allocator);
+        }
+
+        /// LCA semantics:
+        /// - exit from the current leaf up to (but not including) the LCA
+        /// - enter from just below the LCA down to the new leaf
         pub fn transitionTo(self: *Self, next: States) !void {
             if (self.current) |cur| {
-                // Exit only the differing suffix of the current path
                 try self.exitDiff(cur, next);
-                // Enter only the differing suffix of the next path
                 try self.enterDiff(cur, next);
                 self.current = next;
                 return;
             }
-
-            // Initial enter when there is no current state
-            try self.callEnterRecursive(next);
+            // Initial activation: enter the entire next branch (root→leaf)
+            try self.enterWhole(next);
             self.current = next;
         }
 
-        // ── Diff helpers (compute difference around Lowest Common Ancestor) ──
+        inline fn pushCtx(self: *Self) !*Context {
+            const ctx = try self.context_factory.init();
+            try self.ctx_stack.append(self.allocator, ctx);
+            return ctx;
+        }
+
+        inline fn topCtx(self: *Self) *Context {
+            return self.ctx_stack.items[self.ctx_stack.items.len - 1];
+        }
+
+        inline fn popCtx(self: *Self) void {
+            const ctx = self.ctx_stack.pop().?;
+            if (@hasDecl(ContextFactory, "deinit")) {
+                self.context_factory.deinit(ctx);
+            }
+        }
 
         fn exitDiff(self: *Self, cur: anytype, nxt: anytype) !void {
             const CurT = @TypeOf(cur);
@@ -49,7 +75,7 @@ pub fn StateMachine(comptime States: type, comptime Context: type) type {
                         const cur_tag = std.meta.activeTag(cur);
                         const nxt_tag = std.meta.activeTag(nxt);
                         if (cur_tag == nxt_tag) {
-                            // Same parent state and same tag - only exit the inner states
+                            // Same parent & same tag → dive deeper; no exit at this level.
                             switch (cur) {
                                 inline else => |cur_inner, tag| {
                                     const nxt_inner = @field(nxt, @tagName(tag));
@@ -58,29 +84,26 @@ pub fn StateMachine(comptime States: type, comptime Context: type) type {
                             }
                             return;
                         }
+
+                        // Same parent union but different tag → exit *only the active child*.
+                        // Keep the parent union's context alive.
+                        try self.exitActiveChildOnly(cur);
+                        return;
                     }
-                    // Different parent or different tag → exit entire current branch
-                    switch (cur) {
-                        inline else => |inner| {
-                            try self.callExitRecursive(inner);
-                        },
-                    }
-                    // Exit the parent state only if moving to a different parent
-                    if (CurT != NxtT) {
-                        if (@hasDecl(CurT, "exit")) {
-                            try CurT.exit(self.ctx);
-                        }
-                    }
+
+                    // Different union types → exit the whole current branch (child→parent).
+                    try self.exitWhole(cur);
                 },
                 .@"struct" => {
-                    // Leaf: if leaves differ (by type), exit this leaf
+                    // At leaf: if leaf types differ, this leaf is going away → exit it at this level.
                     if (CurT != NxtT) {
                         if (@hasDecl(CurT, "exit")) {
-                            try CurT.exit(self.ctx);
+                            try CurT.exit(self.topCtx());
                         }
+                        self.popCtx();
                     }
                 },
-                else => {}, // Not expected in this design
+                else => {},
             }
         }
 
@@ -94,7 +117,7 @@ pub fn StateMachine(comptime States: type, comptime Context: type) type {
                         const cur_tag = std.meta.activeTag(cur);
                         const nxt_tag = std.meta.activeTag(nxt);
                         if (cur_tag == nxt_tag) {
-                            // Same parent state and same tag - only enter the inner states
+                            // Same parent & same tag → dive deeper; no enter at this level.
                             switch (nxt) {
                                 inline else => |nxt_inner, tag| {
                                     const cur_inner = @field(cur, @tagName(tag));
@@ -103,143 +126,194 @@ pub fn StateMachine(comptime States: type, comptime Context: type) type {
                             }
                             return;
                         }
-                    }
-                    // Enter the parent state only if coming from a different parent
-                    if (CurT != NxtT) {
-                        if (@hasDecl(NxtT, "enter")) {
-                            try NxtT.enter(self.ctx);
-                        }
-                    }
-                    // Enter the inner states
-                    switch (nxt) {
-                        inline else => |inner| {
-                            try self.callEnterRecursive(inner);
-                        },
-                    }
-                },
-                .@"struct" => {
-                    // Leaf: if leaves differ (by type), enter this leaf
-                    if (CurT != NxtT) {
-                        if (@hasDecl(NxtT, "enter")) {
-                            try NxtT.enter(self.ctx);
-                        }
-                    }
-                },
-                else => {}, // Not expected in this design
-            }
-        }
 
-        // ── Hierarchical enter/exit walkers ──
-        // Enter: parent first, then child
-        fn callEnterRecursive(self: *Self, v: anytype) !void {
-            const T = @TypeOf(v);
-            switch (@typeInfo(T)) {
-                .@"union" => {
-                    if (@hasDecl(T, "enter")) {
-                        try T.enter(self.ctx);
+                        // Same parent union, different tag → enter *only the new child*.
+                        // Reuse the existing parent union context; do not re-enter parent.
+                        try self.enterChildOnly(nxt);
+                        return;
                     }
-                    switch (v) {
-                        inline else => |inner| {
-                            try self.callEnterRecursive(inner);
-                        },
-                    }
+
+                    // Different union types → enter the whole next branch (parent→child).
+                    try self.enterWhole(nxt);
                 },
                 .@"struct" => {
-                    if (@hasDecl(T, "enter")) {
-                        try T.enter(self.ctx);
+                    // At leaf: if leaf types differ, enter the new leaf *at this level*.
+                    if (CurT != NxtT) {
+                        const ctx = try self.pushCtx();
+                        if (@hasDecl(NxtT, "enter")) {
+                            try NxtT.enter(ctx);
+                        }
                     }
                 },
                 else => {},
             }
         }
 
-        // Exit: child first, then parent
-        fn callExitRecursive(self: *Self, v: anytype) !void {
+        /// Enter the entire subtree `v` (parent first, then descendants), allocating
+        /// a fresh context for *each* level and keeping them until corresponding exits.
+        fn enterWhole(self: *Self, v: anytype) !void {
             const T = @TypeOf(v);
             switch (@typeInfo(T)) {
                 .@"union" => {
+                    // Enter this union level (push a new context for it)
+                    const ctx = try self.pushCtx();
+                    if (@hasDecl(T, "enter")) {
+                        try T.enter(ctx);
+                    }
+                    // Then enter the active child
                     switch (v) {
                         inline else => |inner| {
-                            try self.callExitRecursive(inner);
+                            try self.enterWhole(inner);
                         },
-                    }
-                    if (@hasDecl(T, "exit")) {
-                        try T.exit(self.ctx);
                     }
                 },
                 .@"struct" => {
-                    if (@hasDecl(T, "exit")) {
-                        try T.exit(self.ctx);
+                    // Enter this leaf level (push new context)
+                    const ctx = try self.pushCtx();
+                    if (@hasDecl(T, "enter")) {
+                        try T.enter(ctx);
                     }
                 },
                 else => {},
             }
         }
 
-        fn typeShortName(comptime T: type) []const u8 {
-            const full = @typeName(T);
-            var i: usize = full.len;
-            while (i > 0) : (i -= 1) {
-                if (full[i - 1] == '.') break;
+        /// Exit the entire subtree `v` (descendants first, then this level),
+        /// calling exits with the matching contexts and popping them.
+        fn exitWhole(self: *Self, v: anytype) !void {
+            const T = @TypeOf(v);
+            switch (@typeInfo(T)) {
+                .@"union" => {
+                    // Exit the active child first
+                    switch (v) {
+                        inline else => |inner| {
+                            try self.exitWhole(inner);
+                        },
+                    }
+                    // Then exit this union level with its context, and pop it
+                    if (@hasDecl(T, "exit")) {
+                        try T.exit(self.topCtx());
+                    }
+                    self.popCtx();
+                },
+                .@"struct" => {
+                    if (@hasDecl(T, "exit")) {
+                        try T.exit(self.topCtx());
+                    }
+                    self.popCtx();
+                },
+                else => {},
             }
-            return full[i..];
+        }
+
+        /// Exit only the *active child* subtree of a union value, leaving the
+        /// union level (and its context) mounted.
+        fn exitActiveChildOnly(self: *Self, u: anytype) !void {
+            switch (u) {
+                inline else => |inner| {
+                    // This will exit the child's entire subtree and pop exactly
+                    // the child's stack frames, but *not* the parent's.
+                    try self.exitWhole(inner);
+                },
+            }
+        }
+
+        /// Enter only the *child* subtree of a union value, assuming the union
+        /// level is already mounted (context already on the stack).
+        fn enterChildOnly(self: *Self, u: anytype) !void {
+            switch (u) {
+                inline else => |inner| {
+                    try self.enterWhole(inner);
+                },
+            }
         }
     };
 }
 
+/// Shared logger used by all contexts to append messages.
+const Logger = struct {
+    allocator: std.mem.Allocator,
+    log: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    pub fn init(alloc: std.mem.Allocator) Logger {
+        return .{ .allocator = alloc, .log = .empty };
+    }
+
+    pub fn append(self: *Logger, msg: []const u8) !void {
+        try self.log.append(self.allocator, msg);
+    }
+
+    pub fn deinit(self: *Logger) void {
+        self.log.deinit(self.allocator);
+    }
+};
+
+/// Per-level context: just carries a reference to the shared Logger.
+const TestCtx = struct {
+    logger: *Logger,
+};
+
+const TestCtxFactory = struct {
+    alloc: std.mem.Allocator,
+
+    const Self = @This();
+
+    fn init(self: *Self) !*TestCtx {
+        const ctx = self.alloc.create(TestCtx) catch @panic("oom");
+        ctx.* = .{ .logger = &global_logger.? };
+        return ctx;
+    }
+
+    fn deinit(self: *Self, ctx: *TestCtx) void {
+        self.alloc.destroy(ctx);
+    }
+};
+
+var global_logger: ?Logger = null;
+
 test "StateMachine hierarchical enter/exit with sibling-substate optimization" {
-    const MyContext = struct {
-        allocator: std.mem.Allocator = std.testing.allocator,
-        log: std.ArrayListUnmanaged([]const u8) = .empty,
-        const Self = @This();
-        pub fn append(self: *Self, msg: []const u8) !void {
-            try self.log.append(self.allocator, msg);
-        }
-        pub fn deinit(self: *Self) void {
-            self.log.deinit(self.allocator);
-        }
-    };
+    global_logger = Logger.init(std.testing.allocator);
+    defer global_logger.?.deinit();
 
     const MyStates = union(enum) {
         StateA: struct {
-            pub fn enter(ctx: *MyContext) !void {
-                try ctx.append("StateA.enter");
+            pub fn enter(ctx: *TestCtx) !void {
+                try ctx.logger.append("StateA.enter");
             }
-            pub fn exit(ctx: *MyContext) !void {
-                try ctx.append("StateA.exit");
+            pub fn exit(ctx: *TestCtx) !void {
+                try ctx.logger.append("StateA.exit");
             }
         },
         StateB: union(enum) {
             SubState1: struct {
-                pub fn enter(ctx: *MyContext) !void {
-                    try ctx.append("SubState1.enter");
+                pub fn enter(ctx: *TestCtx) !void {
+                    try ctx.logger.append("SubState1.enter");
                 }
-                pub fn exit(ctx: *MyContext) !void {
-                    try ctx.append("SubState1.exit");
+                pub fn exit(ctx: *TestCtx) !void {
+                    try ctx.logger.append("SubState1.exit");
                 }
             },
             SubState2: struct {
-                pub fn enter(ctx: *MyContext) !void {
-                    try ctx.append("SubState2.enter");
+                pub fn enter(ctx: *TestCtx) !void {
+                    try ctx.logger.append("SubState2.enter");
                 }
-                pub fn exit(ctx: *MyContext) !void {
-                    try ctx.append("SubState2.exit");
+                pub fn exit(ctx: *TestCtx) !void {
+                    try ctx.logger.append("SubState2.exit");
                 }
             },
-            pub fn enter(ctx: *MyContext) !void {
-                try ctx.append("StateB.enter");
+            pub fn enter(ctx: *TestCtx) !void {
+                try ctx.logger.append("StateB.enter");
             }
-            pub fn exit(ctx: *MyContext) !void {
-                try ctx.append("StateB.exit");
+            pub fn exit(ctx: *TestCtx) !void {
+                try ctx.logger.append("StateB.exit");
             }
         },
     };
 
-    var ctx = MyContext{};
-    defer ctx.deinit();
-
-    const Machine = StateMachine(MyStates, MyContext);
-    var m = Machine.init(&ctx);
+    const Machine = StateMachine(MyStates, TestCtx, TestCtxFactory);
+    var context_factory = TestCtxFactory{ .alloc = std.testing.allocator };
+    var m = Machine.init(std.testing.allocator, &context_factory);
+    defer m.deinit();
 
     // null → StateA
     try m.transitionTo(.StateA);
@@ -264,98 +338,84 @@ test "StateMachine hierarchical enter/exit with sibling-substate optimization" {
         "StateA.enter",
     };
 
-    std.debug.print("Log length: {d}\n", .{ctx.log.items.len});
-    for (ctx.log.items, 0..) |item, idx| {
+    std.debug.print("Log length: {d}\n", .{global_logger.?.log.items.len});
+    for (global_logger.?.log.items, 0..) |item, idx| {
         std.debug.print("Log[{d}] = '{s}'\n", .{ idx, item });
     }
 
-    try std.testing.expectEqual(expected.len, ctx.log.items.len);
-    for (expected, ctx.log.items, 0..) |e, a, idx| {
-        if (!std.mem.eql(u8, e, a)) {
-            std.debug.print("Log mismatch at {d}: expected='{s}' actual='{s}'\n", .{ idx, e, a });
-        }
+    try std.testing.expectEqual(expected.len, global_logger.?.log.items.len);
+    for (expected, global_logger.?.log.items) |e, a| {
         try std.testing.expectEqualStrings(e, a);
     }
 }
 
 test "StateMachine nested LCA transition Leaf1 -> Leaf3" {
-    const MyContext = struct {
-        allocator: std.mem.Allocator = std.testing.allocator,
-        log: std.ArrayListUnmanaged([]const u8) = .empty,
-        const Self = @This();
-        pub fn append(self: *Self, msg: []const u8) !void {
-            try self.log.append(self.allocator, msg);
-        }
-        pub fn deinit(self: *Self) void {
-            self.log.deinit(self.allocator);
-        }
-    };
+    global_logger = Logger.init(std.testing.allocator);
+    defer global_logger.?.deinit();
 
     const MyStates = union(enum) {
         Root: union(enum) {
             Mid1: union(enum) {
                 Leaf1: struct {
-                    pub fn enter(ctx: *MyContext) !void {
-                        try ctx.append("Leaf1.enter");
+                    pub fn enter(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf1.enter");
                     }
-                    pub fn exit(ctx: *MyContext) !void {
-                        try ctx.append("Leaf1.exit");
+                    pub fn exit(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf1.exit");
                     }
                 },
                 Leaf2: struct {
-                    pub fn enter(ctx: *MyContext) !void {
-                        try ctx.append("Leaf2.enter");
+                    pub fn enter(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf2.enter");
                     }
-                    pub fn exit(ctx: *MyContext) !void {
-                        try ctx.append("Leaf2.exit");
+                    pub fn exit(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf2.exit");
                     }
                 },
-                pub fn enter(ctx: *MyContext) !void {
-                    try ctx.append("Mid1.enter");
+                pub fn enter(ctx: *TestCtx) !void {
+                    try ctx.logger.append("Mid1.enter");
                 }
-                pub fn exit(ctx: *MyContext) !void {
-                    try ctx.append("Mid1.exit");
+                pub fn exit(ctx: *TestCtx) !void {
+                    try ctx.logger.append("Mid1.exit");
                 }
             },
             Mid2: union(enum) {
                 Leaf3: struct {
-                    pub fn enter(ctx: *MyContext) !void {
-                        try ctx.append("Leaf3.enter");
+                    pub fn enter(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf3.enter");
                     }
-                    pub fn exit(ctx: *MyContext) !void {
-                        try ctx.append("Leaf3.exit");
+                    pub fn exit(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf3.exit");
                     }
                 },
                 Leaf4: struct {
-                    pub fn enter(ctx: *MyContext) !void {
-                        try ctx.append("Leaf4.enter");
+                    pub fn enter(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf4.enter");
                     }
-                    pub fn exit(ctx: *MyContext) !void {
-                        try ctx.append("Leaf4.exit");
+                    pub fn exit(ctx: *TestCtx) !void {
+                        try ctx.logger.append("Leaf4.exit");
                     }
                 },
-                pub fn enter(ctx: *MyContext) !void {
-                    try ctx.append("Mid2.enter");
+                pub fn enter(ctx: *TestCtx) !void {
+                    try ctx.logger.append("Mid2.enter");
                 }
-                pub fn exit(ctx: *MyContext) !void {
-                    try ctx.append("Mid2.exit");
+                pub fn exit(ctx: *TestCtx) !void {
+                    try ctx.logger.append("Mid2.exit");
                 }
             },
-
-            pub fn enter(ctx: *MyContext) !void {
-                try ctx.append("Root.enter");
+            pub fn enter(ctx: *TestCtx) !void {
+                try ctx.logger.append("Root.enter");
             }
-            pub fn exit(ctx: *MyContext) !void {
-                try ctx.append("Root.exit");
+            pub fn exit(ctx: *TestCtx) !void {
+                try ctx.logger.append("Root.exit");
             }
         },
     };
 
-    var ctx = MyContext{};
-    defer ctx.deinit();
-
-    const Machine = StateMachine(MyStates, MyContext);
-    var m = Machine.init(&ctx);
+    const Machine = StateMachine(MyStates, TestCtx, TestCtxFactory);
+    var context_factory = TestCtxFactory{ .alloc = std.testing.allocator };
+    var m = Machine.init(std.testing.allocator, &context_factory);
+    defer m.deinit();
 
     // null → Root.Mid1.Leaf1
     try m.transitionTo(.{ .Root = .{ .Mid1 = .{ .Leaf1 = .{} } } });
@@ -372,13 +432,15 @@ test "StateMachine nested LCA transition Leaf1 -> Leaf3" {
         "Leaf3.enter",
     };
 
-    std.debug.print("Log length: {d}\n", .{ctx.log.items.len});
-    for (ctx.log.items, 0..) |item, idx| {
+    std.debug.print("Log length: {d}\n", .{global_logger.?.log.items.len});
+    for (global_logger.?.log.items, 0..) |item, idx| {
         std.debug.print("Log[{d}] = '{s}'\n", .{ idx, item });
     }
 
-    try std.testing.expectEqual(expected.len, ctx.log.items.len);
-    for (expected, ctx.log.items) |e, a| {
+    try std.testing.expectEqual(expected.len, global_logger.?.log.items.len);
+    for (expected, global_logger.?.log.items) |e, a| {
         try std.testing.expectEqualStrings(e, a);
     }
 }
+
+const std = @import("std");
