@@ -338,9 +338,11 @@ test "StateMachine hierarchical enter/exit with sibling-substate optimization" {
         "StateA.enter",
     };
 
-    std.debug.print("Log length: {d}\n", .{global_logger.?.log.items.len});
-    for (global_logger.?.log.items, 0..) |item, idx| {
-        std.debug.print("Log[{d}] = '{s}'\n", .{ idx, item });
+    if (DEBUG) {
+        std.debug.print("Log length: {d}\n", .{global_logger.?.log.items.len});
+        for (global_logger.?.log.items, 0..) |item, idx| {
+            std.debug.print("Log[{d}] = '{s}'\n", .{ idx, item });
+        }
     }
 
     try std.testing.expectEqual(expected.len, global_logger.?.log.items.len);
@@ -432,9 +434,11 @@ test "StateMachine nested LCA transition Leaf1 -> Leaf3" {
         "Leaf3.enter",
     };
 
-    std.debug.print("Log length: {d}\n", .{global_logger.?.log.items.len});
-    for (global_logger.?.log.items, 0..) |item, idx| {
-        std.debug.print("Log[{d}] = '{s}'\n", .{ idx, item });
+    if (DEBUG) {
+        std.debug.print("Log length: {d}\n", .{global_logger.?.log.items.len});
+        for (global_logger.?.log.items, 0..) |item, idx| {
+            std.debug.print("Log[{d}] = '{s}'\n", .{ idx, item });
+        }
     }
 
     try std.testing.expectEqual(expected.len, global_logger.?.log.items.len);
@@ -444,3 +448,5 @@ test "StateMachine nested LCA transition Leaf1 -> Leaf3" {
 }
 
 const std = @import("std");
+
+const DEBUG = false;
