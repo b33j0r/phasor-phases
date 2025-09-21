@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .phasor_ecs = .{
-            .url = "git+https://github.com/b33j0r/phasor-ecs#2a1a91be6e68d99bdd3d6dc0d76b7d7d2ab233cf",
-            .hash = "phasor_ecs-0.2.0-BVn8o-e-AABgpXyRpDnDKlxfDQis1uWCxxWPSuLb-FPe",
+            .url = "git+https://github.com/b33j0r/phasor-ecs#e7f6dc52d564797da8d5184cba227c291497b251",
+            .hash = "phasor_ecs-0.2.0-BVn8o-a-AACremXtk0rMtgQoIoZivEPOCNZQC9m6H5MQ",
         },
     },
     .minimum_zig_version = "0.15.1",

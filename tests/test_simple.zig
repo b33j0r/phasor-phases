@@ -16,11 +16,11 @@ const MainMenu = struct {
     }
 
     fn log_enter(logger: EventWriter(Logged)) !void {
-        logger.send(Logged{ .name = "MainMenu.enter" });
+        try logger.send(Logged{ .name = "MainMenu.enter" });
     }
 
     fn log_exit(logger: EventWriter(Logged)) !void {
-        logger.send(Logged{ .name = "MainMenu.exit" });
+        try logger.send(Logged{ .name = "MainMenu.exit" });
     }
 
     fn transition_to_in_game(cmds: *Commands) !void {
@@ -36,11 +36,11 @@ const InGame = struct {
     }
 
     fn log_enter(logger: EventWriter(Logged)) !void {
-        logger.send(Logged{ .name = "InGame.enter" });
+        try logger.send(Logged{ .name = "InGame.enter" });
     }
 
     fn log_exit(logger: EventWriter(Logged)) !void {
-        logger.send(Logged{ .name = "InGame.exit" });
+        try logger.send(Logged{ .name = "InGame.exit" });
     }
 
     fn quit_game(cmds: *Commands) !void {
@@ -58,8 +58,12 @@ test "PhasePlugin sequence MainMenu -> InGame -> Quit" {
     defer app.deinit();
 
     try app.registerEvent(Logged, 100);
-    try app.addPlugin(try MyPhasesPlugin.init(alloc));
+    try app.addPlugin(MyPhasesPlugin{ .allocator = alloc });
 
+    // Run the startup systems first
+    _ = try app.runSchedulesFrom("PreStartup");
+
+    // Then run the first frame
     _ = try app.step(); // 1. MainMenu.enter
     _ = try app.step(); // 2. MainMenu.exit → InGame.enter
     _ = try app.step(); // 3. InGame.exit → Quit
@@ -74,7 +78,10 @@ test "PhasePlugin sequence MainMenu -> InGame -> Quit" {
     };
 
     for (expected) |exp| {
-        const ev = try log.tryRecv() orelse return error.MissingEvent;
+        const ev = try log.tryRecv() orelse {
+            std.debug.print("Expected event: {s}\n", .{exp});
+            return error.MissingEvent;
+        };
         try std.testing.expectEqualStrings(exp, ev.name);
     }
 
