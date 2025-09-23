@@ -19,7 +19,7 @@ pub fn PhasePlugin(PhasesT: type, initial_phase: PhasesT) type {
             try app.insertResource(PhaseContextStackResource{ .stack = stack });
 
             try app.addSystem("Startup", handleInitialPhase);
-            try app.addSystem("Startup", handlePhaseTransitions);
+            try app.addSystem("PostStartup", handlePhaseTransitions);
             try app.addSystem("BetweenFrames", handlePhaseTransitions);
             try app.addSystem("Update", updateCurrentPhaseStack);
         }
