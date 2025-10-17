@@ -1,15 +1,3 @@
-const std = @import("std");
-
-const phasor_ecs = @import("phasor-ecs");
-const App = phasor_ecs.App;
-const Commands = phasor_ecs.Commands;
-const Events = phasor_ecs.Events;
-const EventWriter = phasor_ecs.EventWriter;
-
-const phasor_phases = @import("phasor-phases");
-const PhasePlugin = phasor_phases.PhasePlugin;
-const PhaseContext = phasor_phases.PhaseContext;
-
 /// Logged events
 const Logged = struct {
     name: []const u8,
@@ -146,9 +134,11 @@ test "Hierarchical PhasePlugin sequence MainMenu -> InGame.Playing -> InGame.Pau
         "Quit.enter",
     };
 
+    var receiver = try log.subscribe();
+    defer receiver.deinit();
+
     for (expected) |exp| {
-        const ev = try log.tryRecv() orelse {
-            std.debug.print("Expected event: {s}\n", .{exp});
+        const ev = receiver.tryRecv() orelse {
             return error.MissingEvent;
         };
         try std.testing.expectEqualStrings(exp, ev.name);
@@ -157,3 +147,19 @@ test "Hierarchical PhasePlugin sequence MainMenu -> InGame.Playing -> InGame.Pau
     const cur = app.world.getResource(CurrentPhase).?;
     try std.testing.expect(cur.phase == MyPhases.Quit);
 }
+
+// -------
+// Imports
+// -------
+
+const std = @import("std");
+
+const phasor_ecs = @import("phasor-ecs");
+const App = phasor_ecs.App;
+const Commands = phasor_ecs.Commands;
+const Events = phasor_ecs.Events;
+const EventWriter = phasor_ecs.EventWriter;
+
+const phasor_phases = @import("phasor-phases");
+const PhasePlugin = phasor_phases.PhasePlugin;
+const PhaseContext = phasor_phases.PhaseContext;

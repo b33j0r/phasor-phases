@@ -28,11 +28,26 @@ const MainMenu = struct {
     }
 };
 
+// Quit plugin that transitions to Quit phase
+const QuitPlugin = struct {
+    pub fn build(_: *QuitPlugin, ctx: *PhaseContext) !void {
+        try ctx.addUpdateSystem(quit_system);
+    }
+
+    fn quit_system(cmds: *Commands) !void {
+        try cmds.insertResource(NextPhase{ .phase = MyPhases.Quit });
+    }
+};
+
 const InGame = struct {
     pub fn enter(_: *InGame, ctx: *PhaseContext) !void {
         try ctx.addEnterSystem(log_enter);
         try ctx.addExitSystem(log_exit);
-        try ctx.addUpdateSystem(quit_game);
+
+        // Instead of quitting with a system, we quit with a plugin
+        // try ctx.addUpdateSystem(quit_game);
+
+        try ctx.addPlugin(QuitPlugin{});
     }
 
     fn log_enter(logger: EventWriter(Logged)) !void {
@@ -42,17 +57,13 @@ const InGame = struct {
     fn log_exit(logger: EventWriter(Logged)) !void {
         try logger.send(Logged{ .name = "InGame.exit" });
     }
-
-    fn quit_game(cmds: *Commands) !void {
-        try cmds.insertResource(NextPhase{ .phase = MyPhases.Quit });
-    }
 };
 
 const MyPhasesPlugin = PhasePlugin(MyPhases, MyPhases{ .MainMenu = .{} });
 const NextPhase = MyPhasesPlugin.NextPhase;
 const CurrentPhase = MyPhasesPlugin.CurrentPhase;
 
-test "PhasePlugin sequence MainMenu -> InGame -> Quit" {
+test "PhasePlugin sequence MainMenu -> InGame -> Quit with plugin" {
     const alloc = std.testing.allocator;
     var app = try App.default(alloc);
     defer app.deinit();

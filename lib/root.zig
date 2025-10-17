@@ -9,5 +9,5 @@ pub const PhaseContextStack = phase_context_stack_mod.PhaseContextStack;
 test "ref all decls" {
     _ = PhasePlugin;
     _ = PhaseContext;
-    _ = PhaseContextStack;
+    _ = phase_context_stack_mod;
 }

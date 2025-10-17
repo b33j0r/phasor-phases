@@ -1,29 +1,34 @@
-const std = @import("std");
-
-const phasor_ecs = @import("phasor-ecs");
-const Schedule = phasor_ecs.Schedule;
-const World = phasor_ecs.World;
-
+allocator: std.mem.Allocator,
+plugins: std.ArrayListUnmanaged(Plugin) = .empty,
 enter_schedule: *Schedule,
 update_schedule: *Schedule,
 exit_schedule: *Schedule,
 
+pub const Plugin = struct {
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    build_fn: ?*const fn (*anyopaque, *PhaseContext) anyerror!void,
+    cleanup_fn: ?*const fn (*anyopaque, *PhaseContext) anyerror!void,
+    destroy_fn: *const fn (*anyopaque, std.mem.Allocator) void,
+};
+
 const PhaseContext = @This();
 
-pub fn init(alloc: std.mem.Allocator) !PhaseContext {
+pub fn init(alloc: std.mem.Allocator, world: *World) !PhaseContext {
     const enter_schedule = try alloc.create(Schedule);
     errdefer alloc.destroy(enter_schedule);
-    enter_schedule.* = Schedule.init(alloc);
+    enter_schedule.* = try Schedule.init(alloc, "EnterPhase", world);
 
     const update_schedule = try alloc.create(Schedule);
     errdefer alloc.destroy(update_schedule);
-    update_schedule.* = Schedule.init(alloc);
+    update_schedule.* = try Schedule.init(alloc, "UpdatePhase", world);
 
     const exit_schedule = try alloc.create(Schedule);
     errdefer alloc.destroy(exit_schedule);
-    exit_schedule.* = Schedule.init(alloc);
+    exit_schedule.* = try Schedule.init(alloc, "ExitPhase", world);
 
     return .{
+        .allocator = alloc,
         .enter_schedule = enter_schedule,
         .update_schedule = update_schedule,
         .exit_schedule = exit_schedule,
@@ -31,16 +36,54 @@ pub fn init(alloc: std.mem.Allocator) !PhaseContext {
 }
 
 pub fn deinit(self: *PhaseContext) void {
-    const alloc = self.enter_schedule.allocator;
+    // Free all plugins
+    for (self.plugins.items) |plugin| {
+        plugin.destroy_fn(plugin.ptr, plugin.allocator);
+    }
+    self.plugins.deinit(self.allocator);
 
     self.enter_schedule.deinit();
-    alloc.destroy(self.enter_schedule);
+    self.allocator.destroy(self.enter_schedule);
 
     self.update_schedule.deinit();
-    alloc.destroy(self.update_schedule);
+    self.allocator.destroy(self.update_schedule);
 
     self.exit_schedule.deinit();
-    alloc.destroy(self.exit_schedule);
+    self.allocator.destroy(self.exit_schedule);
+}
+
+fn addPluginInternal(self: *PhaseContext, plugin: Plugin) !void {
+    try self.plugins.append(self.allocator, plugin);
+}
+
+pub fn addPlugin(self: *PhaseContext, plugin: anytype) !void {
+    const T = @TypeOf(plugin);
+    const boxed = try self.allocator.create(T);
+    boxed.* = plugin;
+
+    const p = Plugin{
+        .ptr = boxed,
+        .allocator = self.allocator,
+        .build_fn = if (@hasDecl(T, "build")) &struct {
+            fn call(ptr: *anyopaque, ctx: *PhaseContext) anyerror!void {
+                const self_ptr: *T = @ptrCast(@alignCast(ptr));
+                return self_ptr.build(ctx);
+            }
+        }.call else null,
+        .cleanup_fn = if (@hasDecl(T, "cleanup")) &struct {
+            fn call(ptr: *anyopaque, ctx: *PhaseContext) anyerror!void {
+                const self_ptr: *T = @ptrCast(@alignCast(ptr));
+                return self_ptr.cleanup(ctx);
+            }
+        }.call else null,
+        .destroy_fn = &struct {
+            fn destroy(ptr: *anyopaque, alloc: std.mem.Allocator) void {
+                const self_ptr: *T = @ptrCast(@alignCast(ptr));
+                alloc.destroy(self_ptr);
+            }
+        }.destroy,
+    };
+    try addPluginInternal(self, p);
 }
 
 pub fn addEnterSystem(self: *PhaseContext, system: anytype) !void {
@@ -54,11 +97,30 @@ pub fn addExitSystem(self: *PhaseContext, system: anytype) !void {
 }
 
 pub fn runEnter(self: *PhaseContext, world: *World) !void {
+    for (self.plugins.items) |plugin| {
+        if (plugin.build_fn) |f| {
+            try f(plugin.ptr, self);
+        }
+    }
     try self.enter_schedule.*.run(world);
 }
 pub fn runExit(self: *PhaseContext, world: *World) !void {
     try self.exit_schedule.*.run(world);
+
+    // TODO: run in reverse order?
+    for (self.plugins.items) |plugin| {
+        if (plugin.cleanup_fn) |f| {
+            try f(plugin.ptr, self);
+        }
+    }
 }
 pub fn update(self: *PhaseContext, world: *World) !void {
     try self.update_schedule.*.run(world);
 }
+
+// Imports
+const std = @import("std");
+
+const phasor_ecs = @import("phasor-ecs");
+const Schedule = phasor_ecs.Schedule;
+const World = phasor_ecs.World;

@@ -15,7 +15,7 @@ pub fn PhasePlugin(PhasesT: type, initial_phase: PhasesT) type {
         const Self = @This();
 
         pub fn build(self: *Self, app: *App) !void {
-            const stack = try Stack.init(self.allocator);
+            const stack = try Stack.init(self.allocator, app.world);
             try app.insertResource(PhaseContextStackResource{ .stack = stack });
 
             try app.addSystem("Startup", handleInitialPhase);
@@ -24,11 +24,11 @@ pub fn PhasePlugin(PhasesT: type, initial_phase: PhasesT) type {
             try app.addSystem("Update", updateCurrentPhaseStack);
         }
 
-        pub fn cleanup(_: *Self, app: *App) void {
-            const world = &app.world;
+        pub fn cleanup(_: *Self, app: *App) !void {
+            const world = app.world;
             if (app.getResource(PhaseContextStackResource)) |res| {
                 // Run exits deepest→root, then drop contexts.
-                res.stack.forEachReverse(runExitSystems, world) catch {};
+                try res.stack.forEachReverse(runExitSystems, world);
                 while (res.stack.depth() > 0) {
                     if (res.stack.pop()) |ctx| {
                         ctx.deinit();
