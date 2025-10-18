@@ -12,7 +12,7 @@ const MainMenu = struct {
     pub fn enter(_: *MainMenu, ctx: *PhaseContext) !void {
         try ctx.addEnterSystem(log_enter);
         try ctx.addExitSystem(log_exit);
-        try ctx.addUpdateSystem(transition_to_in_game);
+        try ctx.addSystem("Update", transition_to_in_game);
     }
 
     fn log_enter(logger: EventWriter(Logged)) !void {
@@ -32,7 +32,7 @@ const InGame = struct {
     pub fn enter(_: *InGame, ctx: *PhaseContext) !void {
         try ctx.addEnterSystem(log_enter);
         try ctx.addExitSystem(log_exit);
-        try ctx.addUpdateSystem(quit_game);
+        try ctx.addSystem("Update", quit_game);
     }
 
     fn log_enter(logger: EventWriter(Logged)) !void {
@@ -90,6 +90,48 @@ test "PhasePlugin sequence MainMenu -> InGame -> Quit" {
     // Verify final phase really is Quit
     const cur = app.world.getResource(CurrentPhase).?;
     try std.testing.expect(cur.phase == MyPhases.Quit);
+}
+
+test "systems removed from schedules on phase exit" {
+    const alloc = std.testing.allocator;
+    var app = try App.default(alloc);
+    defer app.deinit();
+
+    try app.registerEvent(Logged, 100);
+    try app.addPlugin(MyPhasesPlugin{ .allocator = alloc });
+
+    // Get baseline system count before any phases are entered
+    // (PhasePlugin adds updateCurrentPhaseStack to Update)
+    const update_schedule = app.getSchedule("Update").?;
+    const baseline_count = update_schedule.getSystemCount();
+
+    // Run the startup systems first - this will enter MainMenu phase
+    // which adds transition_to_in_game to Update schedule
+    _ = try app.runSchedulesFrom("PreStartup");
+
+    // Verify the MainMenu's system was added
+    const systems_after_enter = update_schedule.getSystemCount();
+    try std.testing.expect(systems_after_enter == baseline_count + 1);
+
+    // Run first frame - MainMenu's transition_to_in_game runs and sets NextPhase to InGame
+    _ = try app.step();
+
+    // Now check count immediately after the transition
+    const systems_after_transition = update_schedule.getSystemCount();
+    // The count should still be baseline + 1 (1 phase system + 1 plugin system)
+    try std.testing.expect(systems_after_transition == baseline_count + 1);
+
+    // Run second frame - InGame's quit_game runs and sets NextPhase to Quit, then transitions
+    _ = try app.step();
+
+    // Run third frame - now in Quit phase
+    _ = try app.step();
+
+    // Verify the InGame's quit_game system was removed
+    const systems_after_quit = update_schedule.getSystemCount();
+
+    // After exiting to Quit phase (which has no systems), should be back to baseline
+    try std.testing.expect(systems_after_quit == baseline_count);
 }
 
 // -------

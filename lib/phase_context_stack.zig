@@ -3,13 +3,13 @@ pub fn PhaseContextStack(PhasesT: type) type {
     return struct {
         allocator: std.mem.Allocator,
         stack: std.ArrayListUnmanaged(*PhaseContext) = .empty,
-        world: *World,
+        app: *App,
 
         pub const Phases = PhasesT;
         const Self = @This();
 
-        pub fn init(alloc: std.mem.Allocator, world: *World) !Self {
-            return .{ .allocator = alloc, .world = world };
+        pub fn init(alloc: std.mem.Allocator, app: *App) !Self {
+            return .{ .allocator = alloc, .app = app };
         }
 
         pub fn deinit(self: *Self) void {
@@ -26,7 +26,7 @@ pub fn PhaseContextStack(PhasesT: type) type {
         pub fn push(self: *Self) !*PhaseContext {
             const ctx = try self.allocator.create(PhaseContext);
             errdefer self.allocator.destroy(ctx);
-            ctx.* = try PhaseContext.init(self.allocator, self.world);
+            ctx.* = try PhaseContext.init(self.allocator, self.app);
             try self.stack.append(self.allocator, ctx);
             return ctx;
         }
@@ -63,6 +63,7 @@ pub fn PhaseContextStack(PhasesT: type) type {
 const std = @import("std");
 
 const phasor_ecs = @import("phasor-ecs");
+const App = phasor_ecs.App;
 const World = phasor_ecs.World;
 
 const PhaseContext = @import("PhaseContext.zig");

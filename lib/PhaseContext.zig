@@ -1,5 +1,7 @@
 allocator: std.mem.Allocator,
+app: *App,
 plugins: std.ArrayListUnmanaged(Plugin) = .empty,
+temporary_systems: std.ArrayListUnmanaged(TemporarySystemBinding) = .empty,
 enter_schedule: *Schedule,
 update_schedule: *Schedule,
 exit_schedule: *Schedule,
@@ -12,9 +14,17 @@ pub const Plugin = struct {
     destroy_fn: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
+/// A temporary binding of a system to a schedule within a phase context.
+/// It will be removed after the phase context is destroyed.
+pub const TemporarySystemBinding = struct {
+    schedule_label: []const u8,
+    system: *System,
+};
+
 const PhaseContext = @This();
 
-pub fn init(alloc: std.mem.Allocator, world: *World) !PhaseContext {
+pub fn init(alloc: std.mem.Allocator, app: *App) !PhaseContext {
+    const world = app.world;
     const enter_schedule = try alloc.create(Schedule);
     errdefer alloc.destroy(enter_schedule);
     enter_schedule.* = try Schedule.init(alloc, "EnterPhase", world);
@@ -29,6 +39,7 @@ pub fn init(alloc: std.mem.Allocator, world: *World) !PhaseContext {
 
     return .{
         .allocator = alloc,
+        .app = app,
         .enter_schedule = enter_schedule,
         .update_schedule = update_schedule,
         .exit_schedule = exit_schedule,
@@ -36,6 +47,12 @@ pub fn init(alloc: std.mem.Allocator, world: *World) !PhaseContext {
 }
 
 pub fn deinit(self: *PhaseContext) void {
+    // Remove all temporarily added systems from the app
+    for (self.temporary_systems.items) |binding| {
+        self.app.removeSystemObject(binding.schedule_label, binding.system) catch {};
+    }
+    self.temporary_systems.deinit(self.allocator);
+
     // Free all plugins
     for (self.plugins.items) |plugin| {
         plugin.destroy_fn(plugin.ptr, plugin.allocator);
@@ -96,6 +113,20 @@ pub fn addExitSystem(self: *PhaseContext, system: anytype) !void {
     try self.exit_schedule.*.add(system);
 }
 
+/// Add a system directly to a schedule on the App, tracking it for removal on phase exit
+pub fn addSystem(self: *PhaseContext, schedule_label: []const u8, system: anytype) !void {
+    try self.app.addSystem(schedule_label, system);
+    const sys = self.app.getSystem(schedule_label, system) orelse
+        {
+            return error.SystemNotFound;
+        };
+
+    try self.temporary_systems.append(self.allocator, .{
+        .schedule_label = schedule_label,
+        .system = sys,
+    });
+}
+
 pub fn runEnter(self: *PhaseContext, world: *World) !void {
     for (self.plugins.items) |plugin| {
         if (plugin.build_fn) |f| {
@@ -122,5 +153,7 @@ pub fn update(self: *PhaseContext, world: *World) !void {
 const std = @import("std");
 
 const phasor_ecs = @import("phasor-ecs");
+const App = phasor_ecs.App;
 const Schedule = phasor_ecs.Schedule;
 const World = phasor_ecs.World;
+const System = phasor_ecs.System;

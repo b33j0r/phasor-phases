@@ -12,7 +12,7 @@ const MainMenu = struct {
     pub fn enter(_: *MainMenu, ctx: *PhaseContext) !void {
         try ctx.addEnterSystem(log_enter);
         try ctx.addExitSystem(log_exit);
-        try ctx.addUpdateSystem(transition_to_in_game);
+        try ctx.addSystem("Update", transition_to_in_game);
     }
 
     fn log_enter(logger: EventWriter(Logged)) !void {

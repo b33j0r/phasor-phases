@@ -15,7 +15,7 @@ pub fn PhasePlugin(PhasesT: type, initial_phase: PhasesT) type {
         const Self = @This();
 
         pub fn build(self: *Self, app: *App) !void {
-            const stack = try Stack.init(self.allocator, app.world);
+            const stack = try Stack.init(self.allocator, app);
             try app.insertResource(PhaseContextStackResource{ .stack = stack });
 
             try app.addSystem("Startup", handleInitialPhase);
